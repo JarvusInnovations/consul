@@ -167,35 +167,45 @@ func TestResetSessionTimerLocked_Renew(t *testing.T) {
 
 	testrpc.WaitForLeader(t, s1.RPC, "dc1")
 
-	s1.sessionTimersLock.Lock()
-	s1.resetSessionTimerLocked("foo", 5*time.Millisecond)
-	s1.sessionTimersLock.Unlock()
+	ttl := 100 * time.Millisecond
 
+	// reset the timer
+	s1.sessionTimersLock.Lock()
+	s1.resetSessionTimerLocked("foo", ttl)
 	if _, ok := s1.sessionTimers["foo"]; !ok {
 		t.Fatalf("missing timer")
 	}
+	s1.sessionTimersLock.Unlock()
 
-	time.Sleep(5 * time.Millisecond)
+	// let the timer expire
+	time.Sleep(ttl)
 
-	// Renew the session
-	s1.sessionTimersLock.Lock()
+	// renew the session which should succeed even after
+	// the ttl expired since there is a grace period
+	// todo(fs): is this correct? should we wait ttl/2?
 	renew := time.Now()
-	s1.resetSessionTimerLocked("foo", 5*time.Millisecond)
+	s1.sessionTimersLock.Lock()
+	s1.resetSessionTimerLocked("foo", ttl)
 	s1.sessionTimersLock.Unlock()
 
 	// Watch for invalidation
-	for time.Now().Sub(renew) < 20*time.Millisecond {
+	deadline := renew.Add(2 * structs.SessionTTLMultiplier * ttl)
+	for time.Now().Before(deadline) {
 		s1.sessionTimersLock.Lock()
 		_, ok := s1.sessionTimers["foo"]
 		s1.sessionTimersLock.Unlock()
-		if !ok {
-			end := time.Now()
-			if end.Sub(renew) < 5*time.Millisecond {
-				t.Fatalf("early invalidate")
-			}
-			return
+
+		// timer still exists
+		if ok {
+			time.Sleep(time.Millisecond)
+			continue
 		}
-		time.Sleep(time.Millisecond)
+
+		// timer gone
+		if time.Now().Sub(renew) < ttl {
+			t.Fatalf("early invalidate")
+		}
+		return
 	}
 	t.Fatalf("should have expired")
 }
